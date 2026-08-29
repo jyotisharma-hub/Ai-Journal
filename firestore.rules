@@ -1,0 +1,30 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Default Deny Catch-All (Zero Insecure Defaults)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Auth & Isolation Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128;
+    }
+
+    // User Profile Document
+    match /users/{userId} {
+      allow read, write: if isOwner(userId) && isValidId(userId);
+
+      // User Isolated Multi-turn Journal & Reflection Entries
+      match /entries/{entryId} {
+        allow read, write: if isOwner(userId) && isValidId(entryId);
+      }
+    }
+  }
+}

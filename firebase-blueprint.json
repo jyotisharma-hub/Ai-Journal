@@ -1,0 +1,36 @@
+{
+  "entities": {
+    "UserProfile": {
+      "collection": "users",
+      "path": "users/{userId}",
+      "description": "Authenticated user profile records",
+      "fields": {
+        "userId": { "type": "string" },
+        "displayName": { "type": "string" },
+        "email": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "lastLoginAt": { "type": "string" }
+      }
+    },
+    "JournalEntry": {
+      "collection": "entries",
+      "path": "users/{userId}/entries/{entryId}",
+      "description": "Private, user-isolated multi-turn reflections, journal sessions, summaries, and Gemini chats",
+      "fields": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "category": { "type": "string" },
+        "content": { "type": "string" },
+        "summary": { "type": "string" },
+        "reflectionInsights": { "type": "array" },
+        "messages": { "type": "array" },
+        "tags": { "type": "array" },
+        "mood": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      }
+    }
+  }
+}
