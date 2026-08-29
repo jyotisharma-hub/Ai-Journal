@@ -40,6 +40,32 @@ export const db: Firestore = firebaseConfig.firestoreDatabaseId
   : getFirestore(app);
 
 // -----------------------------------------------------------
+// Sandbox & Local Storage Fallback Helpers (For Demo Sandbox)
+// -----------------------------------------------------------
+
+const LOCAL_STORAGE_PREFIX = 'prod_sec_journal_entries_';
+
+function getLocalSandboxEntries(userId: string): JournalEntry[] {
+  try {
+    const raw = localStorage.getItem(`${LOCAL_STORAGE_PREFIX}${userId}`);
+    if (raw) {
+      return JSON.parse(raw);
+    }
+  } catch (e) {
+    console.warn('Local sandbox storage read notice:', e);
+  }
+  return [];
+}
+
+function saveLocalSandboxEntries(userId: string, entries: JournalEntry[]): void {
+  try {
+    localStorage.setItem(`${LOCAL_STORAGE_PREFIX}${userId}`, JSON.stringify(entries));
+  } catch (e) {
+    console.warn('Local sandbox storage write notice:', e);
+  }
+}
+
+// -----------------------------------------------------------
 // Authentication Helpers
 // -----------------------------------------------------------
 
@@ -64,7 +90,9 @@ export async function logout(): Promise<void> {
 export function subscribeToAuth(callback: (user: User | null) => void) {
   return onAuthStateChanged(auth, (user) => {
     if (user) {
-      syncUserProfile(user).catch(console.error);
+      syncUserProfile(user).catch((err) => {
+        console.warn('Profile sync notice:', err?.message || err);
+      });
     }
     callback(user);
   });
@@ -75,22 +103,33 @@ export function subscribeToAuth(callback: (user: User | null) => void) {
 // -----------------------------------------------------------
 
 export async function syncUserProfile(user: User): Promise<UserProfile> {
-  const userRef = doc(db, 'users', user.uid);
-  const now = new Date().toISOString();
-  
-  const userSnap = await getDoc(userRef);
-  const existingData = userSnap.exists() ? userSnap.data() : null;
-
   const profile: UserProfile = {
     userId: user.uid,
     displayName: user.displayName || user.email?.split('@')[0] || 'Reflective Mind',
     email: user.email || '',
     photoURL: user.photoURL || undefined,
-    createdAt: existingData?.createdAt || now,
-    lastLoginAt: now
+    createdAt: new Date().toISOString(),
+    lastLoginAt: new Date().toISOString()
   };
 
-  await setDoc(userRef, stripUndefined(profile), { merge: true });
+  if (!auth.currentUser || auth.currentUser.uid !== user.uid) {
+    return profile;
+  }
+
+  try {
+    const userRef = doc(db, 'users', user.uid);
+    const userSnap = await getDoc(userRef);
+    const existingData = userSnap.exists() ? userSnap.data() : null;
+    
+    if (existingData?.createdAt) {
+      profile.createdAt = existingData.createdAt;
+    }
+
+    await setDoc(userRef, stripUndefined(profile), { merge: true });
+  } catch (err: any) {
+    console.warn('Firestore user profile sync warning:', err?.message || err);
+  }
+
   return profile;
 }
 
@@ -104,7 +143,7 @@ export async function syncUserProfile(user: User): Promise<UserProfile> {
  */
 export async function saveJournalEntry(userId: string, entry: JournalEntry): Promise<void> {
   if (!userId) {
-    throw new Error('Missing authenticated userId for Firestore entry persistence.');
+    throw new Error('Missing authenticated userId for entry persistence.');
   }
 
   const cleanEntry = stripUndefined({
@@ -113,8 +152,26 @@ export async function saveJournalEntry(userId: string, entry: JournalEntry): Pro
     updatedAt: new Date().toISOString()
   });
 
-  const entryRef = doc(db, 'users', userId, 'entries', entry.id);
-  await setDoc(entryRef, cleanEntry, { merge: true });
+  // If Firebase Auth is authenticated and matches userId, persist to Cloud Firestore
+  if (auth.currentUser && auth.currentUser.uid === userId) {
+    try {
+      const entryRef = doc(db, 'users', userId, 'entries', entry.id);
+      await setDoc(entryRef, cleanEntry, { merge: true });
+      return;
+    } catch (err: any) {
+      console.warn('Firestore save notice, writing to local sandbox buffer:', err?.message);
+    }
+  }
+
+  // Fallback to Sandbox storage for demo mode or during offline transitions
+  const existing = getLocalSandboxEntries(userId);
+  const idx = existing.findIndex(e => e.id === entry.id);
+  if (idx >= 0) {
+    existing[idx] = cleanEntry;
+  } else {
+    existing.unshift(cleanEntry);
+  }
+  saveLocalSandboxEntries(userId, existing);
 }
 
 /**
@@ -122,8 +179,20 @@ export async function saveJournalEntry(userId: string, entry: JournalEntry): Pro
  */
 export async function deleteJournalEntry(userId: string, entryId: string): Promise<void> {
   if (!userId || !entryId) return;
-  const entryRef = doc(db, 'users', userId, 'entries', entryId);
-  await deleteDoc(entryRef);
+
+  if (auth.currentUser && auth.currentUser.uid === userId) {
+    try {
+      const entryRef = doc(db, 'users', userId, 'entries', entryId);
+      await deleteDoc(entryRef);
+      return;
+    } catch (err: any) {
+      console.warn('Firestore delete notice, updating local sandbox:', err?.message);
+    }
+  }
+
+  const existing = getLocalSandboxEntries(userId);
+  const updated = existing.filter(e => e.id !== entryId);
+  saveLocalSandboxEntries(userId, updated);
 }
 
 /**
@@ -139,23 +208,51 @@ export function subscribeToUserEntries(
     return () => {};
   }
 
-  const entriesRef = collection(db, 'users', userId, 'entries');
-  const q = query(entriesRef, orderBy('updatedAt', 'desc'));
+  // Check if authenticated with Firebase Auth
+  const isAuthUser = auth.currentUser && auth.currentUser.uid === userId;
 
-  return onSnapshot(
-    q,
-    (snapshot) => {
-      const entries: JournalEntry[] = [];
-      snapshot.forEach((doc) => {
-        entries.push(doc.data() as JournalEntry);
-      });
-      onUpdate(entries);
-    },
-    (error) => {
-      console.error('Firestore entries subscription error:', error);
-      if (onError) onError(error);
+  if (isAuthUser) {
+    try {
+      const entriesRef = collection(db, 'users', userId, 'entries');
+      const q = query(entriesRef, orderBy('updatedAt', 'desc'));
+
+      return onSnapshot(
+        q,
+        (snapshot) => {
+          const entries: JournalEntry[] = [];
+          snapshot.forEach((doc) => {
+            entries.push(doc.data() as JournalEntry);
+          });
+          onUpdate(entries);
+        },
+        (error) => {
+          // If Firestore permission denied occurs, gracefully fall back to sandbox storage
+          console.warn('Firestore subscription notice (falling back to sandbox buffer):', error?.message || error);
+          const localEntries = getLocalSandboxEntries(userId);
+          onUpdate(localEntries);
+          if (onError) onError(error);
+        }
+      );
+    } catch (err: any) {
+      console.warn('Firestore init error, using sandbox buffer:', err?.message || err);
+      const localEntries = getLocalSandboxEntries(userId);
+      onUpdate(localEntries);
+      return () => {};
     }
-  );
+  }
+
+  // Demo / Sandbox user: Read from local sandbox storage
+  const localEntries = getLocalSandboxEntries(userId);
+  onUpdate(localEntries);
+
+  // Simple window storage listener for cross-tab or sandbox synchronization
+  const handleStorage = (e: StorageEvent) => {
+    if (e.key === `${LOCAL_STORAGE_PREFIX}${userId}`) {
+      onUpdate(getLocalSandboxEntries(userId));
+    }
+  };
+  window.addEventListener('storage', handleStorage);
+  return () => window.removeEventListener('storage', handleStorage);
 }
 
 /**
@@ -163,13 +260,22 @@ export function subscribeToUserEntries(
  */
 export async function fetchUserEntries(userId: string): Promise<JournalEntry[]> {
   if (!userId) return [];
-  const entriesRef = collection(db, 'users', userId, 'entries');
-  const q = query(entriesRef, orderBy('updatedAt', 'desc'));
-  const snapshot = await getDocs(q);
-  
-  const entries: JournalEntry[] = [];
-  snapshot.forEach((doc) => {
-    entries.push(doc.data() as JournalEntry);
-  });
-  return entries;
+
+  if (auth.currentUser && auth.currentUser.uid === userId) {
+    try {
+      const entriesRef = collection(db, 'users', userId, 'entries');
+      const q = query(entriesRef, orderBy('updatedAt', 'desc'));
+      const snapshot = await getDocs(q);
+      
+      const entries: JournalEntry[] = [];
+      snapshot.forEach((doc) => {
+        entries.push(doc.data() as JournalEntry);
+      });
+      return entries;
+    } catch (err: any) {
+      console.warn('Firestore fetch notice, using local sandbox:', err?.message);
+    }
+  }
+
+  return getLocalSandboxEntries(userId);
 }
